@@ -229,6 +229,7 @@ fn is_hidden(e: &DirEntry) -> bool {
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=LLAMA_CPP_LIBS");
 
     let (target_os, target_triple) =
         parse_target_os().unwrap_or_else(|t| panic!("Failed to parse target os {t}"));
@@ -242,6 +243,29 @@ fn main() {
     let build_shared_libs = std::env::var("LLAMA_BUILD_SHARED_LIBS")
         .map(|v| v == "1")
         .unwrap_or(build_shared_libs);
+    let prebuilt = env::var_os("LLAMA_CPP_LIBS").map(|prefix| {
+        assert!(build_shared_libs, "LLAMA_CPP_LIBS requires dynamic-link");
+        let prefix = std::fs::canonicalize(&prefix)
+            .expect("LLAMA_CPP_LIBS must point to an installed library prefix");
+        // Bindings use vendored headers; reject a prefix with a different ABI.
+        for (installed, source) in [
+            ("llama.h", "include/llama.h"),
+            ("ggml.h", "ggml/include/ggml.h"),
+            ("ggml-backend.h", "ggml/include/ggml-backend.h"),
+            ("gguf.h", "ggml/include/gguf.h"),
+        ] {
+            let installed = prefix.join("include").join(installed);
+            let source = llama_src.join(source);
+            println!("cargo:rerun-if-changed={}", installed.display());
+            println!("cargo:rerun-if-changed={}", source.display());
+            assert_eq!(
+                std::fs::read(&installed).expect("missing prebuilt header"),
+                std::fs::read(&source).expect("missing vendored header"),
+                "LLAMA_CPP_LIBS headers differ from vendored sources"
+            );
+        }
+        prefix
+    });
     let profile = env::var("LLAMA_LIB_PROFILE").unwrap_or("Release".to_string());
     let static_crt = env::var("LLAMA_STATIC_CRT")
         .map(|v| v == "1")
@@ -553,6 +577,11 @@ fn main() {
         }
 
         common_wrapper_build.compile("llama_cpp_sys_2_common_wrapper");
+    }
+
+    if let Some(prefix) = prebuilt {
+        link_prebuilt(&prefix, &target_os);
+        return;
     }
 
     // Build with Cmake
@@ -1107,7 +1136,9 @@ fn main() {
         }
         // Newer llama.cpp renamed the common static library `common` ->
         // `llama-common` and split base utilities into `llama-common-base`.
-        println!("cargo:rustc-link-lib=static=llama-common");
+        if !build_shared_libs {
+            println!("cargo:rustc-link-lib=static=llama-common");
+        }
         println!("cargo:rustc-link-lib=static=llama-common-base");
     }
 
@@ -1188,8 +1219,18 @@ fn main() {
         _ => (),
     }
 
-    // copy DLLs to target
-    if build_shared_libs {
+    let runtime_dirs: Vec<_> = ["lib", "lib64", "bin"]
+        .iter()
+        .map(|sub| out_dir.join(sub))
+        .filter(|dir| dir.is_dir())
+        .collect();
+    println!(
+        "cargo:runtime_lib_dirs={}",
+        env::join_paths(&runtime_dirs).unwrap().to_string_lossy()
+    );
+
+    // Windows needs DLLs beside executables; Unix uses the installed prefix.
+    if build_shared_libs && matches!(target_os, TargetOs::Windows(_)) {
         let libs_assets = extract_lib_assets(&out_dir, &target_os);
         for asset in libs_assets {
             let asset_clone = asset.clone();
@@ -1217,5 +1258,64 @@ fn main() {
                 std::fs::hard_link(asset.clone(), dst).unwrap();
             }
         }
+    }
+}
+
+/// Link an installed prefix without configuring CMake or probing GPU toolkits.
+fn link_prebuilt(prefix: &Path, target_os: &TargetOs) {
+    let filename = |name: &str, shared: bool| match target_os {
+        TargetOs::Windows(WindowsVariant::Msvc) => format!("{name}.lib"),
+        TargetOs::Windows(_) if shared => format!("lib{name}.dll.a"),
+        TargetOs::Apple(_) if shared => format!("lib{name}.dylib"),
+        TargetOs::Linux | TargetOs::Android if shared => format!("lib{name}.so"),
+        _ => format!("lib{name}.a"),
+    };
+    let lib = prefix.join("lib");
+    println!("cargo:rustc-link-search=native={}", lib.display());
+    let mut shared = vec!["llama", "ggml", "ggml-base"];
+    if cfg!(feature = "common") {
+        shared.push("llama-common");
+    }
+    for name in shared {
+        let file = lib.join(filename(name, true));
+        assert!(file.is_file(), "LLAMA_CPP_LIBS missing {}", file.display());
+        println!("cargo:rerun-if-changed={}", file.display());
+        println!("cargo:rustc-link-lib=dylib={name}");
+    }
+    let mut archives = Vec::new();
+    if cfg!(feature = "common") {
+        archives.push("llama-common-base");
+    }
+    if cfg!(feature = "mtmd") {
+        archives.push("mtmd");
+    }
+    for name in archives {
+        let file = lib.join(filename(name, false));
+        assert!(file.is_file(), "LLAMA_CPP_LIBS missing {}", file.display());
+        println!("cargo:rerun-if-changed={}", file.display());
+        println!("cargo:rustc-link-lib=static={name}");
+    }
+    if cfg!(feature = "dynamic-backends") {
+        let backends = prefix.join("backends");
+        assert!(
+            backends.is_dir(),
+            "LLAMA_CPP_LIBS missing backends directory"
+        );
+        println!("cargo:rerun-if-changed={}", backends.display());
+        println!("cargo:backends_dir={}", backends.display());
+    } else {
+        println!("cargo:rustc-link-lib=dylib=ggml-cpu");
+    }
+    let runtime = if matches!(target_os, TargetOs::Windows(_)) {
+        prefix.join("bin")
+    } else {
+        lib
+    };
+    println!("cargo:runtime_lib_dirs={}", runtime.display());
+    if matches!(
+        target_os,
+        TargetOs::Linux | TargetOs::Android | TargetOs::Apple(_)
+    ) {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", runtime.display());
     }
 }
