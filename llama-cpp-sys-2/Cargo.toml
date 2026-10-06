@@ -74,6 +74,8 @@ cuda = []
 cuda-no-vmm = ["cuda"]
 metal = []
 dynamic-link = []
+# Require an installed shared-library prefix and never compile llama.cpp.
+prebuilt = ["dynamic-link"]
 vulkan = []
 # OpenCL backend (GGML_OPENCL=ON) — the Qualcomm-supported path for Adreno GPUs.
 # The build needs OpenCL headers + a libOpenCL.so to link; on a cross-compile

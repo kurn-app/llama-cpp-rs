@@ -19,6 +19,13 @@
 This is the home for [llama-cpp-2][crates.io]. It also contains the [llama-cpp-sys] bindings which are updated semi-regularly
 and in sync with [llama-cpp-2][crates.io].
 
+For an installed shared llama.cpp build, enable `prebuilt` and set
+`LLAMA_CPP_LIBS` to its prefix containing `include/` and `lib/`. This skips CMake
+and GPU toolkit discovery and fails if the prefix is missing. Enable
+`dynamic-backends` when the prefix provides backend modules under `backends/`.
+Disable default features if the application does not need the `common` helpers;
+bindgen still needs libclang, but a core-only prebuilt build compiles no C++ code.
+
 This project was created with the explict goal of staying as up to date as possible with llama.cpp, as a result it is
 dead simple, very close to raw bindings, and does not follow semver meaningfully.
 
